@@ -12,9 +12,13 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.StatFs
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
+import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
@@ -29,16 +33,24 @@ import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
+    private lateinit var storageText: TextView
+    private lateinit var storageBar: ProgressBar
+    private lateinit var freedText: TextView
     private lateinit var status: TextView
     private lateinit var total: TextView
     private lateinit var progress: ProgressBar
     private lateinit var scanBtn: Button
+    private lateinit var undoBtn: Button
     private lateinit var cleanBtn: Button
     private lateinit var listView: ListView
+
+    private lateinit var prefs: Prefs
+    private lateinit var bin: SafetyBin
 
     private val io = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var scanner: Scanner? = null
+    private var busy = false
 
     private var items: List<JunkItem> = emptyList()
     private val adapter = JunkAdapter()
@@ -46,19 +58,70 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        storageText = findViewById(R.id.storageText)
+        storageBar = findViewById(R.id.storageBar)
+        freedText = findViewById(R.id.freedText)
         status = findViewById(R.id.status)
         total = findViewById(R.id.total)
         progress = findViewById(R.id.progress)
         scanBtn = findViewById(R.id.scan)
+        undoBtn = findViewById(R.id.undo)
         cleanBtn = findViewById(R.id.clean)
         listView = findViewById(R.id.list)
         listView.adapter = adapter
 
+        prefs = Prefs(this)
+        bin = SafetyBin(this)
+
         scanBtn.setOnClickListener {
-            if (scanner != null) scanner?.cancelled = true
+            val s = scanner
+            if (s != null) s.cancelled = true
             else if (hasStorageAccess()) startScan() else requestStorageAccess()
         }
         cleanBtn.setOnClickListener { confirmClean() }
+        undoBtn.setOnClickListener { undoLastClean() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateStorage()
+        if (hasStorageAccess() && !busy) {
+            // Quietly empty bin batches older than a few days.
+            io.execute {
+                val freed = bin.purgeOlderThan(SafetyBin.KEEP_DAYS)
+                val hasUndo = bin.lastBatch() != null
+                main.post {
+                    if (freed > 0) updateStorage()
+                    undoBtn.visibility = if (hasUndo) View.VISIBLE else View.GONE
+                }
+            }
+        }
+    }
+
+    // ---------- Menu ----------
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, MENU_BIN, 0, "Safety bin…")
+        menu.add(0, MENU_IGNORED, 1, "Ignored folders…")
+        menu.add(0, MENU_USE_BIN, 2, "Use safety bin").setCheckable(true).isChecked = prefs.useBin
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            MENU_BIN -> showBinDialog()
+            MENU_IGNORED -> showIgnoredDialog()
+            MENU_USE_BIN -> {
+                prefs.useBin = !prefs.useBin
+                item.isChecked = prefs.useBin
+                Toast.makeText(this,
+                    if (prefs.useBin) "Cleaned files will be kept ${SafetyBin.KEEP_DAYS} days before deletion"
+                    else "Cleaned files will be deleted immediately",
+                    Toast.LENGTH_LONG).show()
+            }
+            else -> return super.onOptionsItemSelected(item)
+        }
+        return true
     }
 
     // ---------- Permissions ----------
@@ -70,7 +133,7 @@ class MainActivity : Activity() {
     private fun requestStorageAccess() {
         AlertDialog.Builder(this)
             .setTitle("Storage access needed")
-            .setMessage("GhostCleaner needs access to all files to find and remove junk and ghost files. Nothing is deleted until you review the list and tap Clean.")
+            .setMessage("GhostCleaner needs access to all files to find and remove junk and ghost files. Nothing is removed until you review the list and tap Clean.")
             .setPositiveButton("Grant") { _, _ ->
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     try {
@@ -97,10 +160,11 @@ class MainActivity : Activity() {
     // ---------- Scan ----------
 
     private fun startScan() {
-        val s = Scanner(this)
+        val s = Scanner(this, prefs.ignored)
         scanner = s
         items = emptyList()
-        adapter.notifyDataSetChanged()
+        adapter.rebuild()
+        updateTotal()
         setBusy(true, "Scanning…")
         io.execute {
             var last = 0L
@@ -120,52 +184,164 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------- Clean ----------
+    // ---------- Clean & undo ----------
 
     private fun confirmClean() {
         val chosen = items.filter { it.selected }
         if (chosen.isEmpty()) return
         val bytes = chosen.sumOf { it.size }
+        val useBin = prefs.useBin
         AlertDialog.Builder(this)
-            .setTitle("Delete ${chosen.size} items?")
-            .setMessage("This frees about ${Scanner.formatSize(bytes)} and can't be undone.")
-            .setPositiveButton("Delete") { _, _ -> clean(chosen) }
+            .setTitle("Clean ${chosen.size} items?")
+            .setMessage(
+                if (useBin) "About ${Scanner.formatSize(bytes)}. Files go to the safety bin for ${SafetyBin.KEEP_DAYS} days, so you can undo this. Space is fully freed when the bin is emptied."
+                else "This frees about ${Scanner.formatSize(bytes)} and can't be undone.")
+            .setPositiveButton(if (useBin) "Clean" else "Delete") { _, _ -> clean(chosen, useBin) }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun clean(chosen: List<JunkItem>) {
+    private fun clean(chosen: List<JunkItem>, useBin: Boolean) {
         setBusy(true, "Cleaning…")
         io.execute {
-            val (count, bytes) = Scanner.delete(chosen) { n ->
-                main.post { status.text = "Deleting $n / ${chosen.size}" }
+            val onProgress: (Int) -> Unit = { n -> main.post { status.text = "Cleaning $n / ${chosen.size}" } }
+            val result = if (useBin) {
+                bin.moveToBin(chosen, onProgress)
+            } else {
+                var count = 0
+                var bytes = 0L
+                chosen.forEachIndexed { i, item ->
+                    if (SafetyBin.deleteNow(item.file)) { count++; bytes += item.size }
+                    onProgress(i + 1)
+                }
+                SafetyBin.Result(count, bytes, chosen.size - count)
             }
+            val hasUndo = useBin && bin.lastBatch() != null
             main.post {
-                items = items.filterNot { it in chosen && !it.file.exists() }
+                prefs.totalFreed = prefs.totalFreed + result.bytes
+                val gone = chosen.filter { !it.file.exists() }.toSet()
+                items = items.filterNot { it in gone }
                 adapter.rebuild()
                 updateTotal()
-                val failed = chosen.size - count
-                setBusy(false, "Freed ${Scanner.formatSize(bytes)} — removed $count items" +
-                        if (failed > 0) " ($failed couldn't be removed)" else "")
-                Toast.makeText(this, "Cleaned ${Scanner.formatSize(bytes)}", Toast.LENGTH_SHORT).show()
+                updateStorage()
+                undoBtn.visibility = if (hasUndo) View.VISIBLE else View.GONE
+                val verb = if (useBin) "Moved to bin" else "Freed"
+                setBusy(false, "$verb ${Scanner.formatSize(result.bytes)} — ${result.count} items" +
+                        if (result.failed > 0) " (${result.failed} couldn't be removed)" else "")
             }
         }
     }
 
+    private fun undoLastClean() {
+        setBusy(true, "Restoring…")
+        io.execute {
+            val batch = bin.lastBatch()
+            val restored = if (batch != null) bin.restore(batch) else 0
+            val hasMore = bin.lastBatch() != null
+            main.post {
+                undoBtn.visibility = if (hasMore) View.VISIBLE else View.GONE
+                updateStorage()
+                setBusy(false, "Restored $restored items. Scan again to refresh the list.")
+            }
+        }
+    }
+
+    private fun showBinDialog() {
+        io.execute {
+            val size = bin.totalSize()
+            val count = bin.itemCount()
+            main.post {
+                AlertDialog.Builder(this)
+                    .setTitle("Safety bin")
+                    .setMessage("$count items · ${Scanner.formatSize(size)}\n\nCleaned files wait here for ${SafetyBin.KEEP_DAYS} days, then are deleted automatically.")
+                    .setPositiveButton("Empty now") { _, _ ->
+                        io.execute {
+                            val freed = bin.emptyAll()
+                            main.post {
+                                undoBtn.visibility = View.GONE
+                                updateStorage()
+                                status.text = "Bin emptied — freed ${Scanner.formatSize(freed)}"
+                            }
+                        }
+                    }
+                    .setNegativeButton("Close", null)
+                    .show()
+            }
+        }
+    }
+
+    // ---------- Ignore list ----------
+
+    private fun askToIgnore(item: JunkItem) {
+        val folder = if (item.file.isDirectory) item.file else item.file.parentFile ?: return
+        val rel = folder.absolutePath.removePrefix(Environment.getExternalStorageDirectory().absolutePath).ifEmpty { "/" }
+        AlertDialog.Builder(this)
+            .setTitle("Ignore this folder?")
+            .setMessage("$rel\n\nGhostCleaner won't scan or clean anything inside it. You can undo this from the menu under Ignored folders.")
+            .setPositiveButton("Ignore") { _, _ ->
+                prefs.ignored = prefs.ignored + folder.absolutePath
+                val p = folder.absolutePath
+                items = items.filterNot { it.file.absolutePath == p || it.file.absolutePath.startsWith("$p/") }
+                adapter.rebuild()
+                updateTotal()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showIgnoredDialog() {
+        val list = prefs.ignored.sorted()
+        if (list.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Ignored folders")
+                .setMessage("None yet. Long-press any item in the scan results to ignore its folder.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        val root = Environment.getExternalStorageDirectory().absolutePath
+        val labels = list.map { it.removePrefix(root).ifEmpty { "/" } }.toTypedArray()
+        val checked = BooleanArray(list.size)
+        AlertDialog.Builder(this)
+            .setTitle("Tick folders to stop ignoring")
+            .setMultiChoiceItems(labels, checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Remove ticked") { _, _ ->
+                prefs.ignored = list.filterIndexed { i, _ -> !checked[i] }.toSet()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
     // ---------- UI helpers ----------
 
-    private fun setBusy(busy: Boolean, msg: String) {
+    private fun updateStorage() {
+        try {
+            val stat = StatFs(Environment.getExternalStorageDirectory().path)
+            val totalBytes = stat.totalBytes
+            val used = totalBytes - stat.availableBytes
+            storageBar.progress = if (totalBytes > 0) (used * 1000 / totalBytes).toInt() else 0
+            storageText.text = "${Scanner.formatSize(used)} used of ${Scanner.formatSize(totalBytes)} · ${Scanner.formatSize(stat.availableBytes)} free"
+        } catch (e: Exception) {
+            storageText.text = ""
+        }
+        val freed = prefs.totalFreed
+        freedText.text = if (freed > 0) "GhostCleaner has cleaned ${Scanner.formatSize(freed)} so far" else ""
+    }
+
+    private fun setBusy(isBusy: Boolean, msg: String) {
+        busy = isBusy
         status.text = msg
-        progress.visibility = if (busy) View.VISIBLE else View.GONE
-        scanBtn.text = if (busy && scanner != null) "Stop" else "Scan"
-        scanBtn.isEnabled = !busy || scanner != null
-        cleanBtn.isEnabled = !busy && items.any { it.selected }
+        progress.visibility = if (isBusy) View.VISIBLE else View.GONE
+        scanBtn.text = if (isBusy && scanner != null) "Stop" else "Scan"
+        scanBtn.isEnabled = !isBusy || scanner != null
+        undoBtn.isEnabled = !isBusy
+        cleanBtn.isEnabled = !isBusy && items.any { it.selected }
     }
 
     private fun updateTotal() {
         val chosen = items.filter { it.selected }
         total.text = if (items.isEmpty()) "" else Scanner.formatSize(chosen.sumOf { it.size })
-        cleanBtn.isEnabled = scanner == null && chosen.isNotEmpty()
+        cleanBtn.isEnabled = !busy && chosen.isNotEmpty()
         cleanBtn.text = if (chosen.isEmpty()) "Clean" else "Clean (${chosen.size})"
     }
 
@@ -193,7 +369,7 @@ class MainActivity : Activity() {
         }
 
         override fun getCount() = rows.size
-        override fun getItem(p: Int) = rows[p]
+        override fun getItem(p: Int): Any = rows[p]
         override fun getItemId(p: Int) = p.toLong()
         override fun getViewTypeCount() = 2
         override fun getItemViewType(p: Int) = if (rows[p] is Row.Header) 0 else 1
@@ -226,21 +402,30 @@ class MainActivity : Activity() {
                         if (!collapsed.add(row.category)) collapsed.remove(row.category)
                         rebuild()
                     }
+                    v.setOnLongClickListener(null)
+                    v.isLongClickable = false
                 }
                 is Row.Item -> {
-                    val f = row.item.file
+                    val item = row.item
+                    val f = item.file
                     title.text = f.name
                     title.setTypeface(null, Typeface.NORMAL)
-                    val rel = f.parent?.removePrefix(Environment.getExternalStorageDirectory().absolutePath) ?: ""
-                    sub.text = if (row.item.size > 0) "${Scanner.formatSize(row.item.size)} · $rel" else rel.ifEmpty { "/" }
+                    val rel = (f.parent ?: "").removePrefix(Environment.getExternalStorageDirectory().absolutePath).ifEmpty { "/" }
+                    val parts = listOfNotNull(
+                        if (item.size > 0) Scanner.formatSize(item.size) else null,
+                        item.note.ifEmpty { null },
+                        rel,
+                    )
+                    sub.text = parts.joinToString(" · ")
                     sub.maxLines = 1
-                    box.isChecked = row.item.selected
+                    box.isChecked = item.selected
                     box.setOnCheckedChangeListener { _, checked ->
-                        row.item.selected = checked
+                        item.selected = checked
                         notifyDataSetChanged(); updateTotal()
                     }
                     v.setPadding(dp(16), dp(4), 0, dp(4))
                     v.setOnClickListener { box.toggle() }
+                    v.setOnLongClickListener { askToIgnore(item); true }
                 }
             }
             return v
@@ -250,7 +435,7 @@ class MainActivity : Activity() {
             val ctx = this@MainActivity
             return LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
                 addView(CheckBox(ctx).apply { isFocusable = false })
                 addView(LinearLayout(ctx).apply {
                     orientation = LinearLayout.VERTICAL
@@ -274,5 +459,10 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    companion object { private const val REQ_STORAGE = 1 }
+    companion object {
+        private const val REQ_STORAGE = 1
+        private const val MENU_BIN = 1
+        private const val MENU_IGNORED = 2
+        private const val MENU_USE_BIN = 3
+    }
 }

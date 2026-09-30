@@ -4,4 +4,6 @@
     <string name="status_idle">Tap Scan to find junk and ghost files</string>
     <string name="scan">Scan</string>
     <string name="clean">Clean</string>
+    <string name="undo">Undo</string>
+    <string name="hint_long_press">Long-press an item to ignore its folder</string>
 </resources>
