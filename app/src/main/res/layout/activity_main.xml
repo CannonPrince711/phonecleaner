@@ -61,6 +61,32 @@
             android:indeterminate="true"
             android:visibility="gone" />
 
+        <LinearLayout
+            android:id="@+id/filterBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/search"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/search_hint"
+                android:imeOptions="actionSearch"
+                android:importantForAutofill="no"
+                android:inputType="text"
+                android:singleLine="true"
+                android:textSize="14sp" />
+
+            <Spinner
+                android:id="@+id/sort"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
         <ListView
             android:id="@+id/list"
             android:layout_width="match_parent"
@@ -74,7 +100,7 @@
             android:layout_marginBottom="4dp"
             android:alpha="0.6"
             android:gravity="center"
-            android:text="@string/hint_long_press"
+            android:text="@string/hint_rows"
             android:textSize="12sp" />
 
         <LinearLayout
@@ -177,6 +203,21 @@
                 android:text="🗑  Safety bin" />
 
             <TextView
+                android:id="@+id/navBreakdown"
+                style="@style/NavItem"
+                android:text="📊  Storage breakdown" />
+
+            <TextView
+                android:id="@+id/navUnusedApps"
+                style="@style/NavItem"
+                android:text="💤  Unused apps" />
+
+            <TextView
+                android:id="@+id/navHistory"
+                style="@style/NavItem"
+                android:text="🕘  Clean history" />
+
+            <TextView
                 android:id="@+id/navIgnored"
                 style="@style/NavItem"
                 android:text="🚫  Ignored folders" />
@@ -192,6 +233,11 @@
                 android:layout_marginVertical="8dp"
                 android:alpha="0.15"
                 android:background="?android:attr/textColorPrimary" />
+
+            <TextView
+                android:id="@+id/navSettings"
+                style="@style/NavItem"
+                android:text="⚙  Settings" />
 
             <TextView
                 android:id="@+id/navSystemStorage"

@@ -53,4 +53,6 @@ android {
 dependencies {
     // Slide-out sidebar
     implementation("androidx.drawerlayout:drawerlayout:1.2.0")
+    // FileProvider, for opening files in other apps to preview them
+    implementation("androidx.core:core:1.13.1")
 }

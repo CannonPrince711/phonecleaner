@@ -20,4 +20,49 @@ class Prefs(context: Context) {
     var totalFreed: Long
         get() = sp.getLong("total_freed", 0L)
         set(value) = sp.edit().putLong("total_freed", value).apply()
+
+    // ---------- Tunable settings ----------
+
+    var largeFileMb: Int
+        get() = sp.getInt("large_file_mb", 100)
+        set(value) = sp.edit().putInt("large_file_mb", value.coerceIn(1, 100_000)).apply()
+
+    var binDays: Int
+        get() = sp.getInt("bin_days", 3)
+        set(value) = sp.edit().putInt("bin_days", value.coerceIn(1, 365)).apply()
+
+    var dupMinKb: Int
+        get() = sp.getInt("dup_min_kb", 512)
+        set(value) = sp.edit().putInt("dup_min_kb", value.coerceIn(1, 10_000_000)).apply()
+
+    var oldDownloadDays: Int
+        get() = sp.getInt("old_download_days", 90)
+        set(value) = sp.edit().putInt("old_download_days", value.coerceIn(1, 3650)).apply()
+
+    var oldMediaDays: Int
+        get() = sp.getInt("old_media_days", 60)
+        set(value) = sp.edit().putInt("old_media_days", value.coerceIn(1, 3650)).apply()
+
+    var unusedAppDays: Int
+        get() = sp.getInt("unused_app_days", 30)
+        set(value) = sp.edit().putInt("unused_app_days", value.coerceIn(1, 3650)).apply()
+
+    var weeklyScan: Boolean
+        get() = sp.getBoolean("weekly_scan", false)
+        set(value) = sp.edit().putBoolean("weekly_scan", value).apply()
+
+    fun scanConfig() = ScanConfig(
+        largeFileBytes = largeFileMb * 1024L * 1024L,
+        dupMinBytes = dupMinKb * 1024L,
+        oldDownloadDays = oldDownloadDays,
+        oldMediaDays = oldMediaDays,
+    )
 }
+
+/** The knobs the scanner uses; built from [Prefs]. */
+data class ScanConfig(
+    val largeFileBytes: Long = 100L * 1024 * 1024,
+    val dupMinBytes: Long = 512L * 1024,
+    val oldDownloadDays: Int = 90,
+    val oldMediaDays: Int = 60,
+)

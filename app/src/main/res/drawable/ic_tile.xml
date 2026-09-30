@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Single-color ghost for the Quick Settings tile and notifications. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,2.5C7.9,2.5 5,5.6 5,9.8L5,21l2.3,-1.6 2.3,1.6 2.4,-1.6 2.4,1.6 2.3,-1.6L19,21L19,9.8C19,5.6 16.1,2.5 12,2.5zM8,10a1.5,1.9 0,1 0,3 0a1.5,1.9 0,1 0,-3 0zM13,10a1.5,1.9 0,1 0,3 0a1.5,1.9 0,1 0,-3 0z" />
+</vector>

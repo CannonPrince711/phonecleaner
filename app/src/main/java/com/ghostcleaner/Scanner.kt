@@ -18,7 +18,10 @@ enum class Category(val title: String, val description: String) {
     EMPTY_FILE("Empty files (ghost files)", "Zero-byte files that hold no data"),
     EMPTY_FOLDER("Empty folders (ghost folders)", "Folders with nothing inside"),
     DUPLICATE("Duplicate files", "Extra copies; the oldest copy is always kept"),
-    LARGE_FILE("Large files", "Files over 100 MB — not selected, pick what you don't need"),
+    MESSAGING("Messaging app media", "Old WhatsApp & Telegram media; viewed statuses are pre-selected"),
+    SCREENSHOTS("Old screenshots", "Screenshots past the age set in Settings — not selected"),
+    OLD_DOWNLOAD("Old downloads", "Downloads not changed in a long time — not selected"),
+    LARGE_FILE("Large files", "Big files — not selected, pick what you don't need"),
     OWN_CACHE("This app's cache", "Cache created by GhostCleaner itself"),
 }
 
@@ -28,9 +31,15 @@ data class JunkItem(
     val size: Long,
     var selected: Boolean = true,
     val note: String = "",
+    /** Cached so sorting by date doesn't hit the disk. */
+    val modified: Long = file.lastModified(),
 )
 
-class Scanner(private val context: Context, ignored: Set<String>) {
+class Scanner(
+    private val context: Context,
+    ignored: Set<String>,
+    private val config: ScanConfig = ScanConfig(),
+) {
 
     private val root: File = Environment.getExternalStorageDirectory()
     private val rootPath = root.absolutePath
@@ -43,31 +52,49 @@ class Scanner(private val context: Context, ignored: Set<String>) {
     private val tempExtensions = setOf("tmp", "temp", "log", "bak", "old", "dmp")
     private val thumbnailDirNames = setOf(".thumbnails", ".thumbcache", ".thumbdata")
 
+    private val downloadPath = File(root, Environment.DIRECTORY_DOWNLOADS).absolutePath
+    private val screenshotPaths = listOf(
+        File(root, "DCIM/Screenshots").absolutePath,
+        File(root, "Pictures/Screenshots").absolutePath,
+    )
+    private val messagingRoots = listOf(
+        File(root, "Android/media/com.whatsapp/WhatsApp/Media"),
+        File(root, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media"),
+        File(root, "WhatsApp/Media"),
+        File(root, "Android/media/org.telegram.messenger/Telegram"),
+        File(root, "Telegram"),
+    )
+
     /** Regular files big enough to matter for the duplicate / large-file passes. */
     private val candidates = mutableListOf<File>()
+    private val downloads = mutableListOf<File>()
+    private val screenshots = mutableListOf<File>()
+    private val claimed = HashSet<String>() // folders already reported as a whole
     private var installed: Set<String> = emptySet()
 
     @Volatile var cancelled = false
 
     fun scan(onProgress: (String) -> Unit): List<JunkItem> {
         cancelled = false
-        candidates.clear()
+        candidates.clear(); downloads.clear(); screenshots.clear(); claimed.clear()
         installed = installedPackages()
         val results = mutableListOf<JunkItem>()
-        val claimed = HashSet<String>() // folders already reported as a whole
 
         onProgress("Checking leftover app folders…")
-        scanOrphans(results, claimed)
+        scanOrphans(results)
 
         onProgress("Scanning storage…")
         root.listFiles()?.forEach { top ->
             if (cancelled) return finish(results)
             if (top.name in protectedTopLevel) return@forEach
-            if (top.isDirectory) walk(top, results, claimed, onProgress)
-            else classifyFile(top)?.let { results += it }
+            if (top.isDirectory) walk(top, results, onProgress)
+            else if (!isIgnored(top)) classifyFile(top)?.let { results += it }
         }
 
         if (!cancelled) findDuplicates(results, onProgress)
+        if (!cancelled) { onProgress("Checking messaging apps…"); findMessagingMedia(results) }
+        if (!cancelled) findOld(results, screenshots, Category.SCREENSHOTS, config.oldMediaDays)
+        if (!cancelled) findOld(results, downloads, Category.OLD_DOWNLOAD, config.oldDownloadDays)
         if (!cancelled) findLargeFiles(results)
 
         onProgress("Checking app cache…")
@@ -87,16 +114,13 @@ class Scanner(private val context: Context, ignored: Set<String>) {
         return ignoredPaths.any { p == it || p.startsWith("$it/") }
     }
 
+    private fun isUnder(path: String, dir: String) = path.startsWith("$dir/")
+
     /**
      * Walks a directory tree. Returns true if the directory holds only empty
      * folders, so a chain of nested empty folders collapses into one entry.
      */
-    private fun walk(
-        dir: File,
-        results: MutableList<JunkItem>,
-        claimed: MutableSet<String>,
-        onProgress: (String) -> Unit,
-    ): Boolean {
+    private fun walk(dir: File, results: MutableList<JunkItem>, onProgress: (String) -> Unit): Boolean {
         if (cancelled || !dir.isDirectory) return false
         if (dir.absolutePath in claimed || isIgnored(dir)) return false
 
@@ -133,7 +157,7 @@ class Scanner(private val context: Context, ignored: Set<String>) {
             if (cancelled) return false
             if (child.isDirectory) {
                 val before = results.size
-                val childEmpty = walk(child, results, claimed, onProgress)
+                val childEmpty = walk(child, results, onProgress)
                 if (childEmpty) {
                     pendingEmpty += results.subList(before, results.size)
                         .filter { it.category == Category.EMPTY_FOLDER }
@@ -156,7 +180,7 @@ class Scanner(private val context: Context, ignored: Set<String>) {
         return false
     }
 
-    /** Returns a junk item for [f], or null (and records it as a candidate) if it's a normal file. */
+    /** Returns a junk item for [f], or null (and records it for the later passes) if it's a normal file. */
     private fun classifyFile(f: File): JunkItem? {
         val name = f.name
         if (name in protectedNames) return null
@@ -171,12 +195,16 @@ class Scanner(private val context: Context, ignored: Set<String>) {
         }
         if (ext == "apk") return classifyApk(f, len)
 
-        if (len >= MIN_CANDIDATE_SIZE) candidates += f
+        val path = f.absolutePath
+        if (isUnder(path, downloadPath)) downloads += f
+        if (screenshotPaths.any { isUnder(path, it) }) screenshots += f
+        if (len >= minOf(config.dupMinBytes, config.largeFileBytes)) candidates += f
         return null
     }
 
     private fun classifyApk(f: File, len: Long): JunkItem {
         val info = try {
+            @Suppress("DEPRECATION")
             context.packageManager.getPackageArchiveInfo(f.absolutePath, 0)
         } catch (e: Exception) { null }
         val pkg = info?.packageName
@@ -187,6 +215,12 @@ class Scanner(private val context: Context, ignored: Set<String>) {
         }
     }
 
+    private fun listedPaths(results: List<JunkItem>): HashSet<String> =
+        results.map { it.file.absolutePath }.toHashSet()
+
+    private fun insideListed(path: String, listed: Set<String>, listedDirs: List<String>): Boolean =
+        path in listed || listedDirs.any { isUnder(path, it) }
+
     // ---------- Duplicates ----------
 
     /**
@@ -194,7 +228,7 @@ class Scanner(private val context: Context, ignored: Set<String>) {
      * group by size → hash first/last 64 KB → full hash.
      */
     private fun findDuplicates(results: MutableList<JunkItem>, onProgress: (String) -> Unit) {
-        val bySize = candidates.filter { it.length() >= MIN_DUPLICATE_SIZE }
+        val bySize = candidates.filter { it.length() >= config.dupMinBytes }
             .groupBy { it.length() }.values.filter { it.size > 1 }
         val total = bySize.sumOf { it.size }
         var done = 0
@@ -206,7 +240,7 @@ class Scanner(private val context: Context, ignored: Set<String>) {
             for (quickGroup in byQuick.values) {
                 val byFull = quickGroup.groupBy { fullHash(it) }.filter { it.key != null && it.value.size > 1 }
                 for (copies in byFull.values) {
-                    val keep = copies.minWith(compareBy({ it.lastModified() }, { it.absolutePath.length }))
+                    val keep = copies.minWith(compareBy<File>({ it.lastModified() }, { it.absolutePath.length }))
                     val keepRel = keep.absolutePath.removePrefix(rootPath)
                     copies.filter { it != keep }.forEach { dup ->
                         results += JunkItem(dup, Category.DUPLICATE, dup.length(), note = "Copy of $keepRel")
@@ -223,34 +257,80 @@ class Scanner(private val context: Context, ignored: Set<String>) {
             val len = raf.length()
             var n = raf.read(buf)
             if (n > 0) md.update(buf, 0, n)
-            if (len > QUICK_CHUNK * 2) {
+            if (len > QUICK_CHUNK * 2L) {
                 raf.seek(len - QUICK_CHUNK)
                 n = raf.read(buf)
                 if (n > 0) md.update(buf, 0, n)
             }
-            md.digest().joinToString("") { "%02x".format(it) }
+            toHex(md.digest())
         }
     } catch (e: Exception) { null }
 
-    private fun fullHash(f: File): String? = try {
-        f.inputStream().buffered(1 shl 16).use { input ->
-            val md = MessageDigest.getInstance("MD5")
-            val buf = ByteArray(1 shl 16)
-            while (true) {
-                if (cancelled) return null
-                val n = input.read(buf)
-                if (n < 0) break
-                md.update(buf, 0, n)
+    private fun fullHash(f: File): String? {
+        return try {
+            f.inputStream().buffered(1 shl 16).use { input ->
+                val md = MessageDigest.getInstance("MD5")
+                val buf = ByteArray(1 shl 16)
+                while (true) {
+                    if (cancelled) return null
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    md.update(buf, 0, n)
+                }
+                toHex(md.digest())
             }
-            md.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) { null }
+    }
+
+    private fun toHex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
+
+    // ---------- Messaging apps ----------
+
+    private fun findMessagingMedia(results: MutableList<JunkItem>) {
+        val listed = listedPaths(results)
+        val listedDirs = results.filter { it.file.isDirectory }.map { it.file.absolutePath }
+        val cutoff = System.currentTimeMillis() - config.oldMediaDays * DAY_MS
+        for (base in messagingRoots) {
+            if (!base.isDirectory || isIgnored(base)) continue
+            if (insideListed(base.absolutePath, listed, listedDirs)) continue
+            base.walkTopDown()
+                .onEnter { !cancelled && !isIgnored(it) }
+                .filter { it.isFile && it.name !in protectedNames && it.length() > 0 }
+                .forEach { f ->
+                    val path = f.absolutePath
+                    if (insideListed(path, listed, listedDirs)) return@forEach
+                    val rel = f.parentFile?.absolutePath?.removePrefix(base.absolutePath)?.trimStart('/') ?: ""
+                    val isStatus = path.contains("/.Statuses/")
+                    if (isStatus) {
+                        results += JunkItem(f, Category.MESSAGING, f.length(), selected = true, note = "Viewed status")
+                        listed += path
+                    } else if (f.lastModified() < cutoff) {
+                        results += JunkItem(f, Category.MESSAGING, f.length(), selected = false,
+                            note = "${appLabel(base)} · ${rel.ifEmpty { "Media" }}")
+                        listed += path
+                    }
+                }
         }
-    } catch (e: Exception) { null }
+    }
+
+    private fun appLabel(base: File) = if (base.absolutePath.contains("elegram")) "Telegram" else "WhatsApp"
+
+    // ---------- Old screenshots / downloads ----------
+
+    private fun findOld(results: MutableList<JunkItem>, files: List<File>, category: Category, days: Int) {
+        val listed = listedPaths(results)
+        val cutoff = System.currentTimeMillis() - days * DAY_MS
+        files.filter { it.absolutePath !in listed && it.lastModified() in 1 until cutoff }.forEach { f ->
+            val ageDays = (System.currentTimeMillis() - f.lastModified()) / DAY_MS
+            results += JunkItem(f, category, f.length(), selected = false, note = "$ageDays days old")
+        }
+    }
 
     // ---------- Large files ----------
 
     private fun findLargeFiles(results: MutableList<JunkItem>) {
-        val already = results.map { it.file.absolutePath }.toHashSet()
-        candidates.filter { it.length() >= LARGE_FILE_SIZE && it.absolutePath !in already }
+        val listed = listedPaths(results)
+        candidates.filter { it.length() >= config.largeFileBytes && it.absolutePath !in listed }
             .forEach { results += JunkItem(it, Category.LARGE_FILE, it.length(), selected = false) }
     }
 
@@ -260,7 +340,7 @@ class Scanner(private val context: Context, ignored: Set<String>) {
      * Android/data and Android/obb are locked by the OS on Android 11+ even with
      * All-files access, so on newer devices only Android/media can be checked.
      */
-    private fun scanOrphans(results: MutableList<JunkItem>, claimed: MutableSet<String>) {
+    private fun scanOrphans(results: MutableList<JunkItem>) {
         if (installed.isEmpty()) return // can't tell, so don't guess
         val bases = buildList {
             add(File(root, "Android/media"))
@@ -295,10 +375,8 @@ class Scanner(private val context: Context, ignored: Set<String>) {
     }
 
     companion object {
-        const val LARGE_FILE_SIZE = 100L * 1024 * 1024
-        const val MIN_DUPLICATE_SIZE = 512L * 1024
-        private const val MIN_CANDIDATE_SIZE = MIN_DUPLICATE_SIZE
         private const val QUICK_CHUNK = 64 * 1024
+        const val DAY_MS = 24L * 60 * 60 * 1000
 
         fun sizeOf(f: File): Long =
             if (f.isDirectory) f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
