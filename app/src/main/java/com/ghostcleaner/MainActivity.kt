@@ -17,7 +17,6 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
@@ -27,8 +26,10 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ProgressBar
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.drawerlayout.widget.DrawerLayout
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
@@ -43,6 +44,9 @@ class MainActivity : Activity() {
     private lateinit var undoBtn: Button
     private lateinit var cleanBtn: Button
     private lateinit var listView: ListView
+    private lateinit var drawer: DrawerLayout
+    private lateinit var navFreed: TextView
+    private lateinit var navUseBin: Switch
 
     private lateinit var prefs: Prefs
     private lateinit var bin: SafetyBin
@@ -80,6 +84,66 @@ class MainActivity : Activity() {
         }
         cleanBtn.setOnClickListener { confirmClean() }
         undoBtn.setOnClickListener { undoLastClean() }
+
+        setupSidebar()
+    }
+
+    // ---------- Sidebar ----------
+
+    private fun setupSidebar() {
+        drawer = findViewById(R.id.drawer)
+        navFreed = findViewById(R.id.navFreed)
+        navUseBin = findViewById(R.id.navUseBin)
+
+        actionBar?.apply {
+            setDisplayHomeAsUpEnabled(true)
+            setHomeAsUpIndicator(R.drawable.ic_menu)
+            setHomeActionContentDescription("Open menu")
+        }
+
+        val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { null }
+        findViewById<TextView>(R.id.navVersion).text = "Version ${version ?: "?"}"
+
+        fun navAction(id: Int, action: () -> Unit) {
+            findViewById<View>(id).setOnClickListener {
+                drawer.closeDrawer(Gravity.START)
+                action()
+            }
+        }
+        navAction(R.id.navScan) { scanBtn.performClick() }
+        navAction(R.id.navBin) { showBinDialog() }
+        navAction(R.id.navIgnored) { showIgnoredDialog() }
+        navAction(R.id.navSystemStorage) {
+            try { startActivity(Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS)) }
+            catch (e: Exception) { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
+        navAction(R.id.navAbout) { showAbout(version) }
+
+        navUseBin.isChecked = prefs.useBin
+        navUseBin.setOnCheckedChangeListener { _, on ->
+            if (on == prefs.useBin) return@setOnCheckedChangeListener
+            prefs.useBin = on
+            Toast.makeText(this,
+                if (on) "Cleaned files will be kept ${SafetyBin.KEEP_DAYS} days before deletion"
+                else "Cleaned files will be deleted immediately",
+                Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showAbout(version: String?) {
+        AlertDialog.Builder(this)
+            .setTitle("GhostCleaner ${version ?: ""}".trim())
+            .setMessage("Finds and removes junk and ghost files: leftover app folders, old installers, duplicates, temp files, empty files and folders.\n\n" +
+                    "Nothing is removed until you review and confirm. With the safety bin on, cleans can be undone for ${SafetyBin.KEEP_DAYS} days.\n\n" +
+                    "Other apps' caches can only be cleared from System storage settings.")
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (::drawer.isInitialized && drawer.isDrawerOpen(Gravity.START)) drawer.closeDrawer(Gravity.START)
+        else super.onBackPressed()
     }
 
     override fun onResume() {
@@ -98,30 +162,13 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------- Menu ----------
-
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, MENU_BIN, 0, "Safety bin…")
-        menu.add(0, MENU_IGNORED, 1, "Ignored folders…")
-        menu.add(0, MENU_USE_BIN, 2, "Use safety bin").setCheckable(true).isChecked = prefs.useBin
-        return true
-    }
-
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        when (item.itemId) {
-            MENU_BIN -> showBinDialog()
-            MENU_IGNORED -> showIgnoredDialog()
-            MENU_USE_BIN -> {
-                prefs.useBin = !prefs.useBin
-                item.isChecked = prefs.useBin
-                Toast.makeText(this,
-                    if (prefs.useBin) "Cleaned files will be kept ${SafetyBin.KEEP_DAYS} days before deletion"
-                    else "Cleaned files will be deleted immediately",
-                    Toast.LENGTH_LONG).show()
-            }
-            else -> return super.onOptionsItemSelected(item)
+        if (item.itemId == android.R.id.home) {
+            if (drawer.isDrawerOpen(Gravity.START)) drawer.closeDrawer(Gravity.START)
+            else drawer.openDrawer(Gravity.START)
+            return true
         }
-        return true
+        return super.onOptionsItemSelected(item)
     }
 
     // ---------- Permissions ----------
@@ -277,7 +324,7 @@ class MainActivity : Activity() {
         val rel = folder.absolutePath.removePrefix(Environment.getExternalStorageDirectory().absolutePath).ifEmpty { "/" }
         AlertDialog.Builder(this)
             .setTitle("Ignore this folder?")
-            .setMessage("$rel\n\nGhostCleaner won't scan or clean anything inside it. You can undo this from the menu under Ignored folders.")
+            .setMessage("$rel\n\nGhostCleaner won't scan or clean anything inside it. You can undo this from the sidebar under Ignored folders.")
             .setPositiveButton("Ignore") { _, _ ->
                 prefs.ignored = prefs.ignored + folder.absolutePath
                 val p = folder.absolutePath
@@ -326,6 +373,7 @@ class MainActivity : Activity() {
         }
         val freed = prefs.totalFreed
         freedText.text = if (freed > 0) "GhostCleaner has cleaned ${Scanner.formatSize(freed)} so far" else ""
+        if (::navFreed.isInitialized) navFreed.text = "${Scanner.formatSize(freed)} cleaned in total"
     }
 
     private fun setBusy(isBusy: Boolean, msg: String) {
@@ -461,8 +509,5 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_STORAGE = 1
-        private const val MENU_BIN = 1
-        private const val MENU_IGNORED = 2
-        private const val MENU_USE_BIN = 3
     }
 }

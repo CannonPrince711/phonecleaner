@@ -50,4 +50,7 @@ android {
     }
 }
 
-// No third-party dependencies: the app uses only the Android framework.
+dependencies {
+    // Slide-out sidebar
+    implementation("androidx.drawerlayout:drawerlayout:1.2.0")
+}

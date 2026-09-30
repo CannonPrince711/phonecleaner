@@ -21,8 +21,9 @@ It never walks into the `Android/` system folder (other than the orphan check ab
 
 ## Other features
 
-- **Safety bin with Undo.** Cleaned files are moved to a hidden `.GhostCleanerBin` folder for 3 days, then deleted automatically. Tap **Undo** to put the last clean back, or empty the bin early from the menu. Turn it off in the menu to delete immediately.
-- **Ignore list.** Long-press any result to exclude its folder from future scans. Manage it from the menu.
+- **Safety bin with Undo.** Cleaned files are moved to a hidden `.GhostCleanerBin` folder for 3 days, then deleted automatically. Tap **Undo** to put the last clean back, or empty the bin early from the sidebar. Turn it off in the sidebar to delete immediately.
+- **Ignore list.** Long-press any result to exclude its folder from future scans. Manage it from the sidebar.
+- **Sidebar.** Tap ☰ or swipe from the left edge for Scan, Safety bin, Ignored folders, the bin on/off switch, a shortcut to system storage settings (for clearing other apps' caches), and About.
 - **Storage bar.** Shows used and free space, plus how much GhostCleaner has cleaned overall.
 
 **Limits set by Android:** since Android 8, apps can't clear other apps' caches without root, and since Android 11, `Android/data` and `Android/obb` are locked even with All-files access. Use *Settings → Storage* for those.
