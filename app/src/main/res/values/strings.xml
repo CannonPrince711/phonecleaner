@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GhostCleaner</string>
+    <string name="status_idle">Tap Scan to find junk and ghost files</string>
+    <string name="scan">Scan</string>
+    <string name="clean">Clean</string>
+</resources>
